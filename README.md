@@ -46,4 +46,4 @@ sudo apt-get install php-imagick
 - Contributions to this project are welcome! If you find any bugs or have suggestions for improvements, please open an issue or submit a pull request on the GitHub repository.
 
 ### License:
--This project is licensed under the MIT License. Feel free to use and modify it according to your needs.
+- This project is licensed under the MIT License. Feel free to use and modify it according to your needs.
