@@ -1,0 +1,19 @@
+body, html {
+	height: 100%;
+	margin: 0;
+	display: flex;
+	justify-content: center;
+	align-items: center;
+}
+
+.container {
+	border: 1px solid #ccc;
+	border-radius: 12px;
+	padding: 36px;
+	text-align: center;
+}
+
+#canvas {
+	border: 1px solid #ccc;
+	max-width: 100%;
+}
