@@ -1,5 +1,5 @@
 # Image Format Converter
-This PHP-based image converter is a handy tool that allows you to easily convert images between various formats, including JPG, PNG, BMP, GIF, and ICO. It's designed to be user-friendly and efficient, making image conversion a breeze.
+This PHP-based image converter is a handy tool that allows you to easily convert images between various formats, including PDF, TIFF, JPG, PNG, BMP, GIF, and ICO. It's designed to be user-friendly and efficient, making image conversion a breeze.
 
 ## Key Features:
 
