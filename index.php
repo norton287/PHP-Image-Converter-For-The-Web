@@ -1,389 +1,488 @@
 <?php
+declare(strict_types=1);
 
-date_default_timezone_set('America/Chicago');
+ini_set('memory_limit', '256M');
+set_time_limit(120);
 
-//Globals
-global $zip_dir;
-global $upload_dir;
-global $converted_dir;
-global $allowed_formats;
+session_start();
 
-// Misc Vars
-$zip_dir='zips/';
-$upload_dir='uploads/';
-$converted_dir='converted/';
-$directories = ['uploads/', 'converted/', 'zips/']; // Array of directories
-$owner = 'www-data';
-$permissions = 0755; // Octal representation of 755
-$user_files = [];
-// Response echo
+require_once __DIR__ . '/lib/functions.php';
+require_once __DIR__ . '/lib/Converter.php';
+
+// ── Bootstrap required directories ──────────────────────────────────────────
+foreach ([UPLOAD_DIR, CONVERTED_DIR, ZIP_DIR] as $dir) {
+    createDirectory($dir, SERVER_OWNER, 0755);
+}
+
+// ── Per-request CSP nonce (eliminates 'unsafe-inline' for scripts) ──────────
+$nonce = base64_encode(random_bytes(16));
+
+// ── CSRF token (generate once per session) ───────────────────────────────────
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrfToken = $_SESSION['csrf_token'];
+
+// ── Content-Security-Policy — emitted from PHP so it can embed the nonce ────
+header("Content-Security-Policy: "
+    . "default-src 'self'; "
+    . "script-src 'self' 'nonce-{$nonce}' https://umami.spindlecrank.com; "
+    . "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+    . "img-src 'self' data: blob:; "
+    . "connect-src 'self' https://umami.spindlecrank.com; "
+    . "font-src 'self' data:; "
+    . "object-src 'none'; "
+    . "frame-ancestors 'none';"
+);
+
+// ── Rate-limit headers helper ────────────────────────────────────────────────
+function emitRateLimitHeaders(array $rl): void
+{
+    header('X-RateLimit-Limit: '     . RATE_LIMIT_MAX);
+    header('X-RateLimit-Remaining: ' . $rl['remaining']);
+    header('X-RateLimit-Reset: '     . $rl['reset']);
+}
+
+// ── JSON response (async path) ───────────────────────────────────────────────
+function jsonResponse(array $data): never
+{
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($data);
+    exit;
+}
+
+// ── Abort helper ─────────────────────────────────────────────────────────────
+function abortWithError(string $userMessage, bool $isAsync, string $logDetail = ''): never
+{
+    logMessage('Request error: ' . ($logDetail ?: $userMessage), 'warn');
+    if ($isAsync) {
+        jsonResponse(['success' => false, 'error' => $userMessage]);
+    }
+    header('Location: /error.php?error=' . urlencode($userMessage));
+    exit;
+}
+
+// ============================================================================
+// POST handler
+// ============================================================================
+$history = $_SESSION['download_history'] ?? [];
 $resp = '';
 
-function logMessage($message)
-{
-    $logFile = __DIR__ . '/logfile.log';
-    if (!file_exists($logFile)) {
-        touch($logFile);
-        chmod($logFile, 0666); // Sets RW permissions for everyone
-        chown($logFile, 'www-data');
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $isAsync  = ($_POST['_async'] ?? '') === '1';
+    $clientIp = getClientIp();
+
+    // ── CSRF check ────────────────────────────────────────────────────────────
+    $submittedToken = $_POST['_csrf_token']
+        ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '');
+
+    if (!hash_equals($csrfToken, (string)$submittedToken)) {
+        abortWithError('Invalid request. Please refresh and try again.', $isAsync,
+            'CSRF token mismatch');
     }
-    // Format the log message with a timestamp
-    $logMessage = ('Log Entry [' . date('Y-m-d H:i:s') . '] ' . $message) . PHP_EOL;
-    // Append the log message to the log file
-    file_put_contents($logFile, $logMessage, FILE_APPEND);
-}
 
-logMessage("New Convert!");
-
-// Function to create and set permissions for directories
-function createDirectory($directory, $owner, $permissions) {
-	try {
-		mkdir($directory, $permissions, true); // Recursive creation
-		logMessage("Directory $directory created!");
-		chown($directory, $owner);
-		logMessage("Ownership of $directory changed to $owner");       
-	} catch (Exception $e) {
-    	logMessage("Error creating/modifying $directory: " . $e->getMessage());
-    	header("Location: error.php?error=" . urlencode("System Error On Page Load"));
-	}
-}
-
-// Iterate over the array and create directories if needed
-foreach ($directories as $directory) {
-	if (!file_exists($directory)) {
-    	createDirectory($directory, $owner, $permissions);
-    	logMessage("$directory does not exist! Making it now!");
+    // ── Rate limiting ─────────────────────────────────────────────────────────
+    $rl = checkRateLimit($clientIp);
+    emitRateLimitHeaders($rl);
+    if (!$rl['allowed']) {
+        abortWithError('Too many requests. Please wait a moment and try again.', $isAsync);
     }
-}
 
-function purgeOldZipFiles() {
-	logMessage("Purging Old Zips from the Server!");
+    // ── File presence check ───────────────────────────────────────────────────
+    if (!isset($_FILES['images']) || !is_array($_FILES['images']['name'])) {
+        abortWithError('No files were uploaded.', $isAsync);
+    }
 
-    $directory = '/var/www/html/convert/zips/';
-    $maxAgeMinutes = 15;
-    $now = time();
+    // ── Format parsing ────────────────────────────────────────────────────────
+    $fileFormats  = is_array($_POST['file_format'] ?? null) ? $_POST['file_format'] : [];
+    $globalFormat = is_string($_POST['global_format'] ?? null) ? trim($_POST['global_format']) : '';
 
-    // Get all files in the directory
-    $files = scandir($directory);
+    if (!empty($fileFormats)) {
+        foreach ($fileFormats as $fmt) {
+            $fmtObj = ImageFormat::tryFrom((string)$fmt);
+            if ($fmtObj === null || !$fmtObj->isTargetSupported()) {
+                abortWithError('Invalid format selected.', $isAsync, "Invalid format: $fmt");
+            }
+        }
+    } elseif (ImageFormat::tryFrom($globalFormat)?->isTargetSupported() !== true) {
+        abortWithError('Invalid or missing target format.', $isAsync);
+    }
 
-    // Iterate through the files
-    foreach ($files as $file) {
-        // Skip "." and ".."
-        if ($file == '.' || $file == '..') {
+    // ── Resize / quality options ──────────────────────────────────────────────
+    $resizeW    = max(0, (int)($_POST['resize_width']  ?? 0));
+    $resizeH    = max(0, (int)($_POST['resize_height'] ?? 0));
+    $quality    = min(100, max(1, (int)($_POST['quality'] ?? 85)));
+    $resizeMode = in_array($_POST['resize_mode'] ?? '', ['fit', 'fill', 'stretch'], true)
+        ? (string)$_POST['resize_mode']
+        : 'fit';
+
+    // ── File count check ──────────────────────────────────────────────────────
+    $names     = $_FILES['images']['name'];
+    $fileCount = count(array_filter($names, static fn($n): bool => (string)$n !== ''));
+
+    if ($fileCount === 0) {
+        abortWithError('No files were uploaded.', $isAsync);
+    }
+    if ($fileCount > MAX_FILE_COUNT) {
+        abortWithError('Too many files. Maximum is ' . MAX_FILE_COUNT . '.', $isAsync);
+    }
+
+    logMessage('POST received', 'info', [
+        'ip_hash'    => md5($clientIp),
+        'files'      => $fileCount,
+        'format'     => $globalFormat ?: '(per-file)',
+        'resizeMode' => $resizeMode,
+        'quality'    => $quality,
+    ]);
+
+    // ── Normalise file list ───────────────────────────────────────────────────
+    $fileList = [];
+    foreach ($_FILES['images']['tmp_name'] as $key => $tmpName) {
+        $name = basename((string)$_FILES['images']['name'][$key]);
+        if ($name === '') {
             continue;
         }
-
-        // Check if it's a zip file
-        if (substr($file, -4) == '.zip') {
-            $filePath = $directory . $file;
-
-            // Get the last modification time of the file
-            $lastModified = filemtime($filePath);
-
-            // Check if it's older than the specified max age
-            if ($now - $lastModified > $maxAgeMinutes * 60) {
-                // Delete the file
-                unlink($filePath);
-            }
-        }
-    }
-}
-
-// Call the function when index.php loads
-purgeOldZipFiles();
-
-function cleanupFiles($files) {
-    foreach ($files as $file) {
-        unlink($file);
-    	logMessage("Removed file " . $file);
-    }
-    logMessage("Source files deleted!");
-}
-
-function convertImage($source, $destination, $format) {
-    $allowedFormats = ['pdf', 'jpeg', 'jpg', 'png', 'bmp', 'gif', 'ico', 'tiff', 'webp', 'pdf'];
-    $imageInfo = getimagesize($source);
-
-    if (!$imageInfo) {
-        header("Location: error.php?error=" . urlencode("Invalid image file: " . $source));
-        exit;
-    }
-
-    $originalFormat = strtolower($imageInfo[2]);
-    $originalFormat = image_type_to_extension($originalFormat, false);
-
-    if (!in_array($originalFormat, $allowedFormats)) {
-        header("Location: error.php?error=" . urlencode("Unsupported image format: " . $originalFormat));
-        exit;
-    }
-
-    if (!in_array($format, $allowedFormats)) {
-        header("Location: error.php?error=" . urlencode("Invalid target format: " . $format));
-        exit;
-    }
-    try {
-        $image = new Imagick($source);
-        $image->setImageFormat($format);
-        $image->writeImage($destination);
-        logMessage("Image converted to format: " . $format);
-    } catch (Exception $e) {
-        logMessage("Error converting image: " . $e->getMessage());
-        header("Location: error.php?error=" . urlencode("Conversion Error: " . $e->getMessage()));
-        exit();
-    }
-}
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-	$resp = '';
-	$format = $_POST['format'];
-    logMessage("In POST");
-
-    ob_start(); // Start output buffering
-
-    logMessage("Creating new zip file");
-    $zip = new ZipArchive();
-    $zip_path = 'zips/' . time() . '.zip'; // Full path to the zip file
-
-    if ($zip->open($zip_path, ZipArchive::CREATE) !== TRUE) {
-        header("Location: error.php?error=" . urlencode("Zip Creation Failed!"));
-    }
-
-    foreach ($_FILES['images']['tmp_name'] as $key => $tmp_name) {
-		logMessage("In foreach loop processing images!");
-		$uploadedFile = [
-			'name' => $_FILES['images']['name'][$key],
-			'type' => $_FILES['images']['type'][$key],
-			'tmp_name' => $_FILES['images']['tmp_name'][$key],
-			'error' => $_FILES['images']['error'][$key],
-			'size' => $_FILES['images']['size'][$key]
+        $fileList[$key] = [
+            'name'  => $name,
+            'tmp'   => (string)$_FILES['images']['tmp_name'][$key],
+            'error' => (int)$_FILES['images']['error'][$key],
+            'size'  => (int)$_FILES['images']['size'][$key],
         ];
-    	
-		$file_name = $uploadedFile['name'];
-		$file_tmp = $uploadedFile['tmp_name'];
-
-		$allowed_formats = ['pdf', 'jpeg', 'jpg', 'png', 'bmp', 'gif', 'ico', 'tiff', 'webp', 'pdf'];
-		$fileExtension = strtolower(pathinfo($uploadedFile['name'], PATHINFO_EXTENSION));
-        if (!in_array($fileExtension, $allowed_formats)) {
-			logMessage("File type not allowed!");
-			header("Location: error.php?error=" . urlencode("File Type Not Allowed For " . $fileExtension));
-		}
-		     
-        // Validate file
-        if (!is_uploaded_file($file_tmp)) {
-	    	logMessage("Error uploading file! " . $file_tmp);
-        	header("Location: error.php?error=" . urlencode("File Upload Failed For " . $file_tmp));
-        }
-
-        // Validate image
-        if (!getimagesize($file_tmp)) {
-		    logMessage("Invalid image file! " . $file_tmp);
-			header("Location: error.php?error=" . urlencode("Invalid Image File " . $file_tmp));        		    	
-        }
-
-        // Move uploaded file to upload directory
-        move_uploaded_file($file_tmp, $upload_dir.$file_name);
-		logMessage("Moved uploaded file!");
-
-        // Convert image and save to converted directory
-        convertImage($upload_dir.$file_name, $converted_dir.pathinfo($file_name, PATHINFO_FILENAME) . '.' . $format, $format);
-		logMessage("Converted image to new format!");
-        // Add converted image to zip
-	    $local_file_name = pathinfo($file_name, PATHINFO_FILENAME) . '.' . $format; // Construct local file name
-    	$zip->addFile($converted_dir . $local_file_name, $local_file_name); // Add with local name
-	    logMessage("Image added to zip file!");
-
-        // Add uploaded and converted files to user files array
-        array_push($user_files, $upload_dir.$file_name);
-        array_push($user_files, $converted_dir.pathinfo($file_name, PATHINFO_FILENAME) . '.' . $format);
     }
 
-    // Close the zip file after all files have been added
-    $zip->close();
-
-    // Construct the download button HTML in $resp
-    $resp .= '<div class="mb-4 flex items-center justify-center"> <button data-href="download.php?file=' . urlencode($zip_path) . '" id="downloadButton" class="inline-flex items-center px-4 py-2 font-semibold leading-6 text-sm shadow rounded-md text-white bg-indigo-500 hover:bg-indigo-400 transition ease-in-out duration-150">
-         <div class="animate-bounce bg-ingigo-800 dark:bg-slate-800 mr-3 p-2 w-10 h-10 ring-1 ring-slate-900/5 dark:ring-slate-200/20 shadow-lg rounded-full flex items-center justify-center"><svg class="w-6 h-6 text-white" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24" stroke="currentColor"> <path d="M19 14l-7 7m0 0l-7-7m7 7V3"></path></svg></div> Download Zip File </button></div>';
-
-    //$resp .= '<button data-href="download.php?file=' . urlencode($zip_path) . '" id="downloadButton" class="button-class flex flex-wrap item-center p-1 mb-4 bg-green-500 hover:bg-green-800 text-white rounded-md transform transition duration-500 ease-in-out hover:scale-115 w-1/2">Download ZIP file</button>';
-    ob_end_clean();
-    cleanupFiles($user_files);
-    logMessage("Removing users files from server!");
-}
-
-//Old Convert Code
-/*
-function convertImage($source, $destination, $format) {
-    $allowedFormats = ['jpg', 'jpeg', 'png', 'gif', 'bmp'];
-    $imageInfo = getimagesize($source);
-    global $allowed_formats;
-
-    if (!$imageInfo) {
-        header("Location: error.php?error=" . urlencode("Invalid image file: " . $source));
-        exit;
-    }
-
-    $originalFormat = strtolower($imageInfo[2]);
-    $originalFormat = image_type_to_extension($originalFormat, false);
-
-    if (!in_array($originalFormat, $allowedFormats)) {
-        header("Location: error.php?error=" . urlencode("Unsupported image format: " . $originalFormat));
-        exit;
-    }
-
-    if (!in_array($format, $allowedFormats)) {
-        header("Location: error.php?error=" . urlencode("Invalid target format: " . $format));
-        exit;
-    }
+    // ── Run conversion ────────────────────────────────────────────────────────
+    $converter = new Converter([
+        'resize_width'  => $resizeW,
+        'resize_height' => $resizeH,
+        'resize_mode'   => $resizeMode,
+        'quality'       => $quality,
+    ]);
 
     try {
-        $image = new Imagick($source);
-        $image->setImageFormat($format);
-        file_put_contents($destination, $image);
-        logMessage("Image converted from $originalFormat to $format!");
-    } catch (ImagickException $e) {
-        header("Location: error.php?error=" . urlencode("Error converting image: " . $e->getMessage()));
-        exit;
+        $result = $converter->run($fileList, $fileFormats, $globalFormat);
+    } catch (Exception $e) {
+        $converter->cleanup();
+        abortWithError('Conversion error. Please try again.', $isAsync, $e->getMessage());
     }
+
+    $converter->cleanup();
+    logMessage('Batch finished', 'info', [
+        'success'  => $result->successCount,
+        'failures' => count($result->failures),
+    ]);
+
+    // ── All files failed ──────────────────────────────────────────────────────
+    if (!$result->hasDownload()) {
+        $firstError = $result->failures[0]['error'] ?? 'Check that your files are valid images.';
+        abortWithError('No files could be converted. ' . $firstError, $isAsync);
+    }
+
+    // ── Session history ───────────────────────────────────────────────────────
+    $historyEntry = [
+        'file'        => $result->downloadFile,
+        'url'         => $result->downloadUrl,
+        'label'       => $result->downloadLabel,
+        'count'       => $result->successCount,
+        'format'      => !empty($fileFormats)
+            ? implode(', ', array_unique(array_values($fileFormats)))
+            : $globalFormat,
+        'output_size' => $result->outputBytes,
+        'time'        => time(),
+    ];
+    $_SESSION['download_history'] = array_slice(
+        array_merge([$historyEntry], $_SESSION['download_history'] ?? []),
+        0,
+        5
+    );
+    $history = $_SESSION['download_history'];
+
+    // ── Async JSON response ───────────────────────────────────────────────────
+    if ($isAsync) {
+        jsonResponse([
+            'success'     => true,
+            'url'         => $result->downloadUrl,
+            'label'       => $result->downloadLabel,
+            'count'       => $result->successCount,
+            'is_zip'      => $result->isZip,
+            'output_size' => $result->outputBytes,
+            'failures'    => $result->failures,
+            'history'     => $history,
+        ]);
+    }
+
+    // ── Non-async fallback ────────────────────────────────────────────────────
+    $dlUrlSafe = htmlspecialchars($result->downloadUrl,   ENT_QUOTES, 'UTF-8');
+    $lblSafe   = htmlspecialchars($result->downloadLabel, ENT_QUOTES, 'UTF-8');
+    $resp = '<div class="mb-4 flex items-center justify-center">
+        <a href="' . $dlUrlSafe . '" id="downloadButton" class="btn-download success-enter">
+            <div class="btn-download-icon animate-bounce">
+                <svg class="w-5 h-5" fill="none" stroke-linecap="round" stroke-linejoin="round"
+                     stroke-width="2" viewBox="0 0 24 24" stroke="currentColor">
+                    <path d="M19 14l-7 7m0 0l-7-7m7 7V3"></path>
+                </svg>
+            </div>
+            ' . $lblSafe . '
+        </a>
+    </div>';
 }
-*/
+
+logMessage($_SERVER['REQUEST_METHOD'] === 'POST' ? 'POST handled' : 'GET page load', 'info');
+
+// ── Format label map ──────────────────────────────────────────────────────────
+$FORMAT_LABELS = [];
+foreach (ImageFormat::targetOptions() as $fmt) {
+    $FORMAT_LABELS[$fmt->value] = $fmt->label();
+}
+$FORMAT_LABELS_JSON = json_encode($FORMAT_LABELS, JSON_HEX_TAG | JSON_HEX_AMP);
+
+$jsConfig = json_encode([
+    'maxFiles'     => MAX_FILE_COUNT,
+    'maxBytes'     => MAX_FILE_SIZE,
+    'formats'      => $FORMAT_LABELS,
+    'csrfToken'    => $csrfToken,
+    'purgeSeconds' => PURGE_MINUTES * 60,
+], JSON_HEX_TAG | JSON_HEX_AMP);
+
+$nonceSafe = htmlspecialchars($nonce, ENT_QUOTES, 'UTF-8');
+$csrfSafe  = htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8');
 ?>
-
 <!DOCTYPE html>
-<html>
+<html lang="en" data-theme="dark">
 <head>
-	<script defer src="https://umami.spindlecrank.com/script.js" data-website-id="c78b165b-efb2-48d4-b67d-a457db6e4ad9"></script>
+    <meta charset="UTF-8">
+    <script nonce="<?= $nonceSafe ?>">
+    (function(){
+        try {
+            var t = localStorage.getItem('app-theme') ||
+                (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+            document.documentElement.setAttribute('data-theme', t);
+        } catch(e) {}
+    }());
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-	<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
-	<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
-	<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
-	<link rel="manifest" href="/site.webmanifest">
-	<link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5">
-	<meta name="msapplication-TileColor" content="#da532c">
-	<meta name="theme-color" content="#ffffff">
-	<meta name="google-site-verification" content="gu3duYB5OEsqTehyFOA1M1OOzJ--AfbTsk4dt_CVJTU" />
-    <title>Image Converter</title>
-	<meta name="description" content="Welcome to Image Format Converter! Convert your images to different formats quickly and easily.">
-    <meta name="keywords" content="Image Converter, Spindlecrank, JPG, PNG, BMP, GIF, ICO">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css">
+    <title>Image Converter — Spindlecrank</title>
+    <meta name="description" content="Convert your images to different formats quickly and easily. Supports JPG, PNG, BMP, GIF, ICO, TIFF, WEBP, PDF, and SVG.">
+    <meta name="keywords" content="Image Converter, Spindlecrank, JPG, PNG, BMP, GIF, ICO, WEBP, TIFF, PDF, SVG">
+    <meta name="google-site-verification" content="gu3duYB5OEsqTehyFOA1M1OOzJ--AfbTsk4dt_CVJTU">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="msapplication-TileColor" content="#da532c">
+
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+    <link rel="manifest" href="/site.webmanifest">
+    <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5">
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"
+          integrity="sha512-c42qTSw/wPZ3/5LBzD+Bw5f7bSF2oxou6wEb+I/lqeaKV5FDIfMvvRp772y4jcJLKuGUOpbJMdg/BTl50fJaA=="
+          crossorigin="anonymous" referrerpolicy="no-referrer">
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.16/dist/tailwind.min.css" rel="stylesheet">
-    <style>
-        * {
-            font-family: Arial, sans-serif, ui-sans-serif, ui-serif, serif;
-        }
-        
-        @media (min-width: *tablet-min-width*px) and (max-width: *tablet-max-width*px) { 
- `           body { 
-                width: 100%; /* Ensure body takes full width */
-                /* Add other tablet-specific styles if needed */
-             }
-            .content-container { /* If you have a container for your form */
-                width: 100%; 
-            }
-        }
+    <link rel="stylesheet" href="styles.css">
 
-        @keyframes bounce {
-            0%, 100% {
-                transform: translateY(0);
-            }
-
-            50% {
-                transform: translateY(-10px);
-            }
-        }
-
-        /* #waiting {
-           display: none;
-            font-size: 1.5em;
-            font-weight: bold;
-			color: red;
-            animation: bounce 1s infinite;
-        } */
-    </style>
+    <script defer src="https://umami.spindlecrank.com/script.js"
+            data-website-id="8b98fc8b-d862-4c6e-92ec-65775d0fbca7"></script>
 </head>
-<body class="bg-gradient-to-r from-indigo-700 via-purple-500 to-blue-300 flex justify-center items-center min-h-screen w-full">
-    <div class="w-3/4 p-6 bg-gray-600 shadow-md rounded-lg animate__animated animate__slideInRight focus:scale-115">
-        <!-- Title Section -->
-        <h1 class="text-3xl text-2xl text-center text-white mb-4 animate__animated animate__delay-1s animate__fadeInDown">Image Format Converter</h1>
-        <p class="text-l text-center text-white mb-6">Convert your images to multiple formats easily and quickly.</p>
-        <!-- Form Section -->
-        <div id="form-div" class="flex flex-col w-3/4 justify-self-center">
-            <form id="convertForm" method="POST" enctype="multipart/form-data" class="w-full space-y-4">
-            
-                <!-- File Upload Field -->
-                <div id="upload-div" class="flex flex-col justify-left">
-                    <label class="block text-white font-medium mb-1 justify-left">Select Images:</label>
-                    <input type="file" name="images[]" accept="image/*" multiple required class="text-white w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 justify-left">
-                    <p class="text-xs text-white mt-1">Upload up to 10 images at a time.</p>
+<body class="app-page">
+
+    <div class="app-card animate__animated animate__slideInRight">
+
+        <button id="themeToggle" class="theme-toggle" type="button"
+                title="Toggle light/dark mode" aria-label="Toggle light/dark mode">
+            <svg class="icon-sun w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707M17.657 17.657l-.707-.707M6.343 6.343l-.707-.707M12 8a4 4 0 100 8 4 4 0 000-8z"/>
+            </svg>
+            <svg class="icon-moon w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+            </svg>
+        </button>
+
+        <h1 class="text-3xl text-center font-bold mb-1 c-primary animate__animated animate__delay-1s animate__fadeInDown">
+            Image Format Converter
+        </h1>
+        <p class="text-base text-center mb-6 c-secondary">
+            Convert images to JPG, PNG, WEBP, PDF, SVG, and more — instantly.
+        </p>
+
+        <div id="errorBanner" role="alert" class="hidden error-banner mb-4">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+            </svg>
+            <span id="errorMessage" class="flex-1"></span>
+            <button type="button" class="error-close"
+                    onclick="document.getElementById('errorBanner').classList.add('hidden')"
+                    aria-label="Dismiss">&times;</button>
+        </div>
+
+        <form id="convertForm" method="POST" enctype="multipart/form-data" class="space-y-5">
+            <input type="hidden" name="_async"      value="1">
+            <input type="hidden" name="_csrf_token" value="<?= $csrfSafe ?>">
+
+            <div id="dropZone" class="drop-zone">
+                <input type="file" id="imageInput" name="images[]"
+                       accept="image/*,.pdf,.svg" multiple class="hidden">
+
+                <div id="dropPrompt">
+                    <svg class="w-12 h-12 mx-auto mb-3 text-indigo-300 opacity-80" fill="none"
+                         viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                              d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                    </svg>
+                    <p class="font-medium mb-1 c-primary">
+                        Drop images here or <span class="c-accent underline">tap to browse</span>
+                    </p>
+                    <p class="text-xs c-muted">
+                        Up to <?= MAX_FILE_COUNT ?> files &bull; max 20&nbsp;MB each &bull;
+                        JPG, PNG, BMP, GIF, ICO, TIFF, WEBP, PDF, SVG
+                    </p>
                 </div>
 
-                <!-- Format Selection Field -->
-                <div id="format-div" class="flex flex-col justify-left">
-                    <label class="block text-white font-medium mb-1 justify-left">Select Format to Convert To:</label>
-                    <select name="format" required class="text-black w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 justify-left">
-                        <option value="">--Choose an option--</option>
-                        <option value="jpg">JPG</option>
-                        <option value="png">PNG</option>
-                        <option value="bmp">BMP</option>
-                        <option value="gif">GIF</option>
-                        <option value="ico">ICO</option>
-                        <option value="tiff">TIFF</option>
-                        <option value="webp">WEBP</option>
-                        <option value="pdf">PDF</option>
-                    </select>
+                <div id="fileList" class="hidden space-y-2 text-left"></div>
+
+                <div id="fileControls" class="hidden mt-3 flex gap-3 justify-center">
+                    <button type="button" id="addMoreBtn"   class="add-files-btn">+ Add more files</button>
+                    <button type="button" id="clearFilesBtn" class="clear-files-btn">Clear all</button>
                 </div>
             </div>
-            <div id="button-div" class="flex flex-col w-full items-center mt-8">
-                <button type="submit" id="submit" class="mb-4 w-2/5 sm:w-2/5 md:w-2/5 l:w-2/5 xl:w-1/5 2xl:w-1/5 p-3 bg-blue-500 text-white font-semibold shadow rounded-md transform transition duration-500 hover:bg-blue-600 hover:scale-110">Convert</button>
+
+            <div class="flex flex-col sm:flex-row sm:items-center gap-3">
+                <label for="globalFormat" class="c-label font-medium text-sm whitespace-nowrap flex-shrink-0">
+                    Convert all to:
+                </label>
+                <select id="globalFormat" name="global_format" class="app-select flex-1">
+                    <option value="">-- Choose a format --</option>
+                    <?php foreach ($FORMAT_LABELS as $val => $label): ?>
+                    <option value="<?= htmlspecialchars($val,   ENT_QUOTES, 'UTF-8') ?>">
+                        <?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?>
+                    </option>
+                    <?php endforeach; ?>
+                </select>
+                <span class="section-hint hidden sm:block">(or set per-file below)</span>
+            </div>
+
+            <details class="advanced-panel" id="advancedPanel">
+                <summary>
+                    <span>Advanced Options</span>
+                    <svg class="chevron w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                    </svg>
+                </summary>
+                <div class="panel-body space-y-4">
+                    <div>
+                        <p class="panel-section-label">Resize (0 = keep original)</p>
+                        <div class="flex gap-4">
+                            <div class="flex-1">
+                                <label for="resizeWidth" class="input-label">Max Width (px)</label>
+                                <input type="number" id="resizeWidth" name="resize_width"
+                                       min="0" max="16000" value="0" class="app-number">
+                            </div>
+                            <div class="flex-1">
+                                <label for="resizeHeight" class="input-label">Max Height (px)</label>
+                                <input type="number" id="resizeHeight" name="resize_height"
+                                       min="0" max="16000" value="0" class="app-number">
+                            </div>
+                        </div>
+                    </div>
+                    <div>
+                        <p class="panel-section-label">Resize Mode</p>
+                        <div class="flex gap-4 flex-wrap">
+                            <label class="resize-mode-label">
+                                <input type="radio" name="resize_mode" value="fit" checked class="resize-mode-radio">
+                                <span class="resize-mode-text">
+                                    <strong>Fit</strong>
+                                    <span class="resize-mode-hint">Preserve ratio within bounds</span>
+                                </span>
+                            </label>
+                            <label class="resize-mode-label">
+                                <input type="radio" name="resize_mode" value="fill" class="resize-mode-radio">
+                                <span class="resize-mode-text">
+                                    <strong>Fill</strong>
+                                    <span class="resize-mode-hint">Crop to exact size</span>
+                                </span>
+                            </label>
+                            <label class="resize-mode-label">
+                                <input type="radio" name="resize_mode" value="stretch" class="resize-mode-radio">
+                                <span class="resize-mode-text">
+                                    <strong>Stretch</strong>
+                                    <span class="resize-mode-hint">Exact size, ignore ratio</span>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+                    <div>
+                        <label for="qualitySlider" class="quality-label">
+                            Quality — JPG / WEBP only:
+                            <span id="qualityVal" class="quality-val">85</span>%
+                        </label>
+                        <input type="range" id="qualitySlider" name="quality"
+                               min="1" max="100" value="85">
+                    </div>
+                </div>
+            </details>
+
+            <div class="flex justify-center pt-2">
+                <button type="submit" id="submitBtn" class="btn-convert">Convert</button>
             </div>
         </form>
-        <!-- Working and Download Divs -->
-        <div id="result" class="mt-6 flex flex-col items-center text-center w-full"><?php echo $resp; ?></div>
-        <div id='waiting' class="mb-4 flex flex-row w-full items-center justify-center hidden">
-            <div class="flex items-center justify-center"> 
-                <button type="button" class="inline-flex items-center p-4 font-semibold leading-6 text-sm shadow rounded-md text-white bg-indigo-500 hover:bg-indigo-400 transition ease-in-out duration-150 cursor-not-allowed" disabled="">
-                    <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    Processing...
-                </button>
+
+        <div id="waiting" class="mt-6 spinner-wrap" style="display:none">
+            <div class="spinner-pill">
+                <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                     fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle class="opacity-25" cx="12" cy="12" r="10"
+                            stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Converting&hellip;
             </div>
         </div>
-        <!-- <div id="waiting" class="text-white ml-1 mr-6 mb-6 mt-6 flex flex-col items-center text-center w-full"></div> -->
-        <div class="w-full flex flex-col items-center justify-center">
-		    <p class="w-full text-center mt-4 mb-8 font-semibold text-l hover:text-green-500 text-white italic animate__animated animate__delay-3s animate__zoomInUp"><span id="powered">Proudly Powered By spindlecrank.com</span></p>
-	    </div>
+
+        <div id="result" class="mt-6 flex flex-col items-center text-center w-full">
+            <?= $resp ?>
+        </div>
+
+        <?php if (!empty($history)): ?>
+        <div id="historySection" class="history-section">
+            <h2 class="history-title">Recent Downloads</h2>
+            <ul class="space-y-2" id="historyList">
+                <?php
+                $nowTs    = time();
+                $purgeWin = PURGE_MINUTES * 60;
+                foreach ($history as $entry):
+                    $expired = ($nowTs - (int)$entry['time']) > $purgeWin;
+                    $sizeStr = !empty($entry['output_size'])
+                        ? ' &middot; ' . number_format((int)$entry['output_size'] / 1024, 0) . '&nbsp;KB'
+                        : '';
+                    $timeStr = date('g:i a', (int)$entry['time']);
+                    $urlSafe = htmlspecialchars((string)$entry['url'],    ENT_QUOTES, 'UTF-8');
+                    $fmtSafe = htmlspecialchars(strtoupper((string)$entry['format']), ENT_QUOTES, 'UTF-8');
+                ?>
+                <li class="history-item<?= $expired ? ' expired' : '' ?>">
+                    <span class="history-item-text">
+                        <?= (int)$entry['count'] ?> file<?= (int)$entry['count'] !== 1 ? 's' : '' ?>
+                        &rarr; <strong><?= $fmtSafe ?></strong><?= $sizeStr ?>
+                        <span class="ts ml-1"><?= $timeStr ?></span>
+                    </span>
+                    <?php if ($expired): ?>
+                        <span class="history-expired">Expired</span>
+                    <?php else: ?>
+                        <a href="<?= $urlSafe ?>" class="history-link">Re-download</a>
+                    <?php endif; ?>
+                </li>
+                <?php endforeach; ?>
+            </ul>
+        </div>
+        <?php endif; ?>
+
+        <p class="footer-text mt-8 animate__animated animate__delay-3s animate__zoomInUp">
+            Proudly Powered By <a href="https://spindlecrank.com">spindlecrank.com</a>
+        </p>
     </div>
-<script>
-	document.getElementById('submit').addEventListener('click', function(e) {
-   		var waitingDiv = document.getElementById('waiting');
-    	var resultDiv = document.getElementById('result');
-    	//waitingDiv.innerHTML = "Converting Files!";
-    	waitingDiv.style.display = 'block'; // Display the waiting message
 
-    	var checkResult = setInterval(function() {
-      		if (resultDiv.innerHTML.trim() !== "") {
-        		waitingDiv.style.display = 'none'; // Hide the waiting message
-      			resultDiv.style.display = 'block';
-        		clearInterval(checkResult);
-    		}
-    	}, 1000); // checks every second
-	});
-
-	document.addEventListener('DOMContentLoaded', function() {
-    	const form = document.getElementById('convertForm');
-    	const dButton = document.getElementById('downloadButton');
-    	const fileInput = document.getElementById('images');
-
-      	dButton.addEventListener('click', function(event) { // Added event parameter
-      		window.location.href = event.target.getAttribute('data-href');
-	    	var resultDiv = document.getElementById('result');
-     		resultDiv.innerHTML = "";
-       		const formData = new FormData(form);
-      		formData.delete('images[]'); 
-      		form.reset();
-		});
-	});
-</script>
+    <script nonce="<?= $nonceSafe ?>">
+    window.AppConfig = <?= $jsConfig ?>;
+    </script>
+    <script src="app.js"></script>
 </body>
 </html>
