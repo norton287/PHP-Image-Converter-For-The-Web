@@ -47,8 +47,8 @@ function loadEnv(string $path): void
 // Path constants — all absolute, derived from this file's location.
 // lib/ is one level below web root; private/ sits alongside web/ (outside HTTP reach).
 // ---------------------------------------------------------------------------
-define('WEB_ROOT',      dirname(__DIR__));                      // e.g. /workspace/web
-define('PRIVATE_ROOT',  dirname(WEB_ROOT) . '/private');        // e.g. /workspace/private
+define('WEB_ROOT',      dirname(__DIR__));                      // e.g. /var/www/html/convert
+define('PRIVATE_ROOT',  WEB_ROOT);                              // data dirs live inside the web root (protected by .htaccess / nginx)
 define('LOG_FILE',      PRIVATE_ROOT . '/app.log');
 define('UPLOAD_DIR',    PRIVATE_ROOT . '/uploads/');
 define('CONVERTED_DIR', PRIVATE_ROOT . '/converted/');
