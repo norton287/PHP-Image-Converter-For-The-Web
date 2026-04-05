@@ -1,57 +1,87 @@
 <?php
+declare(strict_types=1);
 
-date_default_timezone_set('America/Chicago');
+require_once __DIR__ . '/lib/functions.php';
 
-function logMessage($message)
-{
-    $logFile = __DIR__ . '/logfile.log';
-    if (!file_exists($logFile)) {
-        touch($logFile);
-        chmod($logFile, 0666); // Sets RW permissions for everyone
-        chown($logFile, 'www-data');
-    }
-    // Format the log message with a timestamp
-    $logMessage = ('Log Entry [' . date('Y-m-d H:i:s') . '] ' . $message) . PHP_EOL;
-    // Append the log message to the log file
-    file_put_contents($logFile, $logMessage, FILE_APPEND);
+logMessage('Download requested', 'info');
+
+if (empty($_GET['file'])) {
+    logMessage('Download rejected — no file parameter', 'warn');
+    http_response_code(400);
+    header('Content-Type: text/plain');
+    exit('Invalid request.');
 }
 
-logMessage("Downloading!");
+// Accept: exactly 32 hex chars + one of the supported extensions
+$requested = basename(urldecode((string)$_GET['file']));
+$validExtensions = implode('|', array_keys(DOWNLOAD_MIME));
 
+if (!preg_match('/^[a-f0-9]{32}\.(' . $validExtensions . ')$/', $requested, $matches)) {
+    logMessage('Download rejected — invalid filename pattern', 'warn', ['file' => $requested]);
+    http_response_code(403);
+    header('Content-Type: text/plain');
+    exit('Access denied.');
+}
 
-    // Check if the 'file' parameter is set in the URL
-    if(isset($_GET['file']) && !empty($_GET['file'])) {
-        $filePath = urldecode($_GET['file']);
+$ext      = $matches[1];
+$mimeType = DOWNLOAD_MIME[$ext] ?? 'application/octet-stream';
 
-        // Check if the file exists
-        if(file_exists($filePath)) {
-            // Set headers to force download
-            header('Content-Description: File Transfer');
-            header('Content-Type: application/octet-stream');
-            header('Content-Disposition: attachment; filename="'.basename($filePath).'"');
-            header('Expires: 0');
-            header('Cache-Control: must-revalidate');
-            header('Pragma: public');
-            header('Content-Length: ' . filesize($filePath));
-			logMessage("Set Headers for Download!");
-            // Clear output buffer
-            ob_clean();
+// Confirm the file is physically inside ZIP_DIR (block symlink / path traversal)
+$zipBase  = realpath(ZIP_DIR);
+$filePath = realpath(ZIP_DIR . $requested);
 
-            // Flush the output buffer
-            flush();
+if ($zipBase === false || $filePath === false
+    || strncmp($filePath, $zipBase, strlen($zipBase)) !== 0) {
+    logMessage('Download rejected — path outside ZIP_DIR', 'warn', ['file' => $requested]);
+    http_response_code(403);
+    header('Content-Type: text/plain');
+    exit('Access denied.');
+}
 
-            // Read the file content and send it to the output
-            readfile($filePath);
-        	logMessage("Download path is " . $filePath);
+if (!is_file($filePath)) {
+    logMessage('Download failed — file not found', 'warn', ['file' => $requested]);
+    http_response_code(404);
+    header('Content-Type: text/plain');
+    exit('File not found or has expired.');
+}
 
-            // Exit to prevent any additional output
-            exit;
-        } else {
-            echo 'File not found.';
-        	logMessage("File Not Found During Download!");
-        }
-    } else {
-        echo 'Invalid request.';
-    	logMessage("Invalid Server Request During Download!");
-    }
-?>
+$fileSize = filesize($filePath);
+if ($fileSize === false) {
+    logMessage('Download failed — filesize() error', 'error', ['file' => $requested]);
+    http_response_code(500);
+    header('Content-Type: text/plain');
+    exit('Server error.');
+}
+
+$displayName = ($ext === 'zip') ? 'converted_images.zip' : 'converted.' . $ext;
+
+logMessage('Serving file', 'info', ['name' => $displayName, 'bytes' => $fileSize]);
+
+header('Content-Description: File Transfer');
+header('Content-Type: ' . $mimeType);
+header('Content-Disposition: attachment; filename="' . $displayName . '"');
+header('Expires: 0');
+header('Cache-Control: must-revalidate');
+header('Pragma: public');
+header('Content-Length: ' . $fileSize);
+
+// ── Offload to web server if configured (frees PHP worker immediately) ────────
+// Apache mod_xsendfile: set XSENDFILE_ENABLED=1 in .env
+if (XSENDFILE_ENABLED) {
+    header('X-Sendfile: ' . $filePath);
+    exit;
+}
+// nginx X-Accel-Redirect: set NGINX_ACCEL_PATH=/zips-internal/ in .env
+// (requires matching `internal` location block in nginx.conf)
+if (NGINX_ACCEL_PATH !== '') {
+    header('X-Accel-Redirect: ' . NGINX_ACCEL_PATH . $requested);
+    exit;
+}
+
+// Default: PHP streams the file
+if (ob_get_level() > 0) {
+    ob_clean();
+}
+flush();
+readfile($filePath);
+exit;

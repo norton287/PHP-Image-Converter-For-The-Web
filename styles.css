@@ -1,19 +1,708 @@
-body, html {
-	height: 100%;
-	margin: 0;
-	display: flex;
-	justify-content: center;
-	align-items: center;
+/* =====================================================================
+   CSS Custom Properties — Theme System
+   dark is the default; light overrides via [data-theme="light"]
+   ===================================================================== */
+:root,
+[data-theme="dark"] {
+    /* Page gradient */
+    --page-from: #1e1b4b;
+    --page-via:  #312e81;
+    --page-to:   #4c1d95;
+
+    /* Card */
+    --card-bg:     rgba(15, 23, 42, 0.88);
+    --card-border: rgba(255, 255, 255, 0.08);
+    --card-shadow: 0 25px 50px rgba(0, 0, 0, 0.55);
+
+    /* Text */
+    --text-primary:   #ffffff;
+    --text-secondary: #d1d5db;
+    --text-muted:     #9ca3af;
+    --text-label:     #e5e7eb;
+
+    /* Inputs */
+    --input-bg:     #1f2937;
+    --input-text:   #f9fafb;
+    --input-border: #4b5563;
+    --input-focus:  #6366f1;
+
+    /* Drop zone */
+    --dz-bg:           rgba(17, 24, 39, 0.55);
+    --dz-border:       rgba(255, 255, 255, 0.35);
+    --dz-hover-bg:     rgba(99, 102, 241, 0.22);
+    --dz-hover-border: rgba(255, 255, 255, 0.85);
+
+    /* File card */
+    --file-card-bg:  rgba(31, 41, 55, 0.78);
+    --thumb-ph-bg:   #374151;
+    --thumb-ph-text: #9ca3af;
+
+    /* Advanced details */
+    --details-bg: rgba(17, 24, 39, 0.55);
+
+    /* History */
+    --history-border:  rgba(255, 255, 255, 0.12);
+    --history-item-bg: rgba(31, 41, 55, 0.65);
+
+    /* Error banner */
+    --error-bg:   rgba(127, 29, 29, 0.9);
+    --error-text: #fecaca;
+    --error-icon: #f87171;
+
+    /* Links / accents */
+    --link-color: #a5b4fc;
+    --link-hover: #e0e7ff;
+
+    /* Theme toggle */
+    --toggle-bg:    rgba(255, 255, 255, 0.10);
+    --toggle-hover: rgba(255, 255, 255, 0.20);
+
+    /* Dividers */
+    --divider: rgba(255, 255, 255, 0.12);
+
+    /* Footer */
+    --footer-text: #6b7280;
 }
 
-.container {
-	border: 1px solid #ccc;
-	border-radius: 12px;
-	padding: 36px;
-	text-align: center;
+[data-theme="light"] {
+    --page-from: #c7d2fe;
+    --page-via:  #ddd6fe;
+    --page-to:   #ede9fe;
+
+    --card-bg:     rgba(255, 255, 255, 0.94);
+    --card-border: rgba(0, 0, 0, 0.07);
+    --card-shadow: 0 25px 50px rgba(99, 102, 241, 0.18);
+
+    --text-primary:   #111827;
+    --text-secondary: #374151;
+    --text-muted:     #6b7280;
+    --text-label:     #374151;
+
+    --input-bg:     #f9fafb;
+    --input-text:   #111827;
+    --input-border: #d1d5db;
+    --input-focus:  #6366f1;
+
+    --dz-bg:           rgba(238, 242, 255, 0.80);
+    --dz-border:       rgba(99, 102, 241, 0.40);
+    --dz-hover-bg:     rgba(99, 102, 241, 0.10);
+    --dz-hover-border: rgba(99, 102, 241, 0.85);
+
+    --file-card-bg:  rgba(249, 250, 251, 0.95);
+    --thumb-ph-bg:   #e5e7eb;
+    --thumb-ph-text: #6b7280;
+
+    --details-bg: rgba(243, 244, 246, 0.92);
+
+    --history-border:  rgba(0, 0, 0, 0.08);
+    --history-item-bg: rgba(243, 244, 246, 0.92);
+
+    --error-bg:   #fee2e2;
+    --error-text: #7f1d1d;
+    --error-icon: #dc2626;
+
+    --link-color: #4338ca;
+    --link-hover: #1e1b4b;
+
+    --toggle-bg:    rgba(0, 0, 0, 0.07);
+    --toggle-hover: rgba(0, 0, 0, 0.13);
+
+    --divider: rgba(0, 0, 0, 0.09);
+
+    --footer-text: #9ca3af;
 }
 
-#canvas {
-	border: 1px solid #ccc;
-	max-width: 100%;
+/* =====================================================================
+   Base Reset & Typography
+   ===================================================================== */
+*, *::before, *::after { box-sizing: border-box; }
+
+/* Tailwind's .hidden is display:none without !important; our component
+   classes (display:flex etc.) would otherwise win due to load order. */
+.hidden { display: none !important; }
+
+/* Belt-and-suspenders: hide the error banner by ID until JS removes .hidden */
+#errorBanner.hidden { display: none !important; }
+
+html, body {
+    height: 100%;
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
 }
+
+/* =====================================================================
+   Page Background
+   ===================================================================== */
+.app-page {
+    min-height: 100vh;
+    background: linear-gradient(135deg,
+        var(--page-from) 0%,
+        var(--page-via)  50%,
+        var(--page-to)   100%);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 2rem 1rem;
+}
+
+/* =====================================================================
+   App Card
+   ===================================================================== */
+.app-card {
+    width: 100%;
+    max-width: 42rem;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    box-shadow: var(--card-shadow);
+    border-radius: 1rem;
+    padding: 2rem;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    position: relative;
+}
+
+/* =====================================================================
+   Theme Toggle
+   ===================================================================== */
+.theme-toggle {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    width: 2.25rem;
+    height: 2.25rem;
+    min-width: 2.25rem;
+    border-radius: 50%;
+    background: var(--toggle-bg);
+    border: 1px solid var(--card-border);
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, transform 0.15s;
+    flex-shrink: 0;
+    padding: 0;
+}
+.theme-toggle:hover {
+    background: var(--toggle-hover);
+    transform: scale(1.1) rotate(12deg);
+}
+
+/* In dark mode show the sun icon (click → go light) */
+.theme-toggle .icon-sun  { display: block; }
+.theme-toggle .icon-moon { display: none; }
+
+/* In light mode show the moon icon (click → go dark) */
+[data-theme="light"] .theme-toggle .icon-sun  { display: none; }
+[data-theme="light"] .theme-toggle .icon-moon { display: block; }
+
+/* =====================================================================
+   Semantic Colour Utilities  (CSS-var backed, theme-aware)
+   ===================================================================== */
+.c-primary   { color: var(--text-primary); }
+.c-secondary { color: var(--text-secondary); }
+.c-muted     { color: var(--text-muted); }
+.c-label     { color: var(--text-label); }
+.c-accent    { color: #818cf8; }
+.c-link      { color: var(--link-color); }
+
+/* =====================================================================
+   Inputs, Selects, Number fields
+   ===================================================================== */
+.app-input,
+.app-select,
+.app-number {
+    background: var(--input-bg);
+    color: var(--input-text);
+    border: 1px solid var(--input-border);
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    width: 100%;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    -webkit-appearance: none;
+    appearance: none;
+    line-height: 1.5;
+}
+.app-input:focus,
+.app-select:focus,
+.app-number:focus {
+    outline: none;
+    border-color: var(--input-focus);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.22);
+}
+
+/* Prevent iOS zoom on input focus (requires >= 16 px) */
+@media (max-width: 768px) {
+    .app-input, .app-select, .app-number, .per-file-format {
+        font-size: 16px;
+    }
+}
+
+/* Per-file format select (compact, inline in file card) */
+.per-file-format {
+    background: var(--input-bg);
+    color: var(--input-text);
+    border: 1px solid var(--input-border);
+    border-radius: 0.375rem;
+    padding: 0.25rem 0.4rem;
+    font-size: 0.8125rem;
+    min-width: 5.5rem;
+    transition: border-color 0.15s;
+    -webkit-appearance: none;
+    appearance: none;
+    line-height: 1.4;
+}
+.per-file-format:focus {
+    outline: none;
+    border-color: var(--input-focus);
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.18);
+}
+
+/* =====================================================================
+   Drop Zone
+   ===================================================================== */
+.drop-zone {
+    background: var(--dz-bg);
+    border: 2px dashed var(--dz-border);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    text-align: center;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+    min-height: 8rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+.drop-zone.drag-over {
+    background: var(--dz-hover-bg);
+    border-color: var(--dz-hover-border);
+    border-style: solid;
+}
+.drop-zone.has-files {
+    border-style: solid;
+    border-color: var(--dz-border);
+    cursor: default;
+    align-items: stretch;
+    justify-content: flex-start;
+}
+
+/* =====================================================================
+   File Card (thumbnail + info + format select)
+   ===================================================================== */
+.file-card {
+    display: grid;
+    grid-template-columns: 48px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    background: var(--file-card-bg);
+    border-radius: 0.5rem;
+    padding: 0.5rem;
+}
+
+.file-thumb {
+    width: 48px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 6px;
+    display: block;
+}
+
+.file-thumb-placeholder {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    background: var(--thumb-ph-bg);
+    color: var(--thumb-ph-text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.file-name {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-size {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 1px;
+}
+
+.file-remove {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 1.25rem;
+    line-height: 1;
+    padding: 0 0.25rem;
+    flex-shrink: 0;
+    min-width: 1.75rem;
+    min-height: 1.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+}
+.file-remove:hover {
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.12);
+}
+
+/* File controls (Add more / Clear all) */
+.add-files-btn {
+    font-size: 0.75rem;
+    color: var(--link-color);
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-decoration: underline;
+    padding: 0;
+    min-height: 1.75rem;
+    transition: color 0.15s;
+}
+.add-files-btn:hover { color: var(--link-hover); }
+
+.clear-files-btn {
+    font-size: 0.75rem;
+    color: #f87171;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-decoration: underline;
+    padding: 0;
+    min-height: 1.75rem;
+    transition: color 0.15s;
+}
+.clear-files-btn:hover { color: #fca5a5; }
+
+/* =====================================================================
+   Advanced Options Panel (details / summary)
+   ===================================================================== */
+.advanced-panel {
+    background: var(--details-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 0.75rem;
+    overflow: hidden;
+}
+.advanced-panel > summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 0.75rem 1rem;
+    color: var(--text-label);
+    font-size: 0.875rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.advanced-panel > summary::-webkit-details-marker { display: none; }
+.advanced-panel[open] .chevron { transform: rotate(180deg); }
+.chevron { transition: transform 0.2s ease; }
+
+.panel-body {
+    padding: 0.5rem 1rem 1rem;
+}
+.panel-section-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+}
+.input-label {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+.quality-label {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+}
+.quality-val { color: #818cf8; font-weight: 700; }
+
+/* =====================================================================
+   Error Banner
+   ===================================================================== */
+.error-banner {
+    background: var(--error-bg);
+    color: var(--error-text);
+    border-radius: 0.5rem;
+    padding: 0.875rem 1rem;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+}
+.error-banner svg { color: var(--error-icon); flex-shrink: 0; margin-top: 2px; }
+.error-close {
+    margin-left: auto;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--error-text);
+    opacity: 0.7;
+    font-size: 1.25rem;
+    line-height: 1;
+    padding: 0;
+    min-width: 1.5rem;
+    min-height: 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.error-close:hover { opacity: 1; }
+
+/* =====================================================================
+   Convert Button
+   ===================================================================== */
+.btn-convert {
+    width: 12rem;
+    padding: 0.875rem 1.5rem;
+    background: #3b82f6;
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 1rem;
+    border-radius: 0.75rem;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 4px 15px rgba(59, 130, 246, 0.35);
+    transition: background 0.15s, transform 0.12s, box-shadow 0.15s;
+    min-height: 3rem;
+}
+.btn-convert:hover:not(:disabled) {
+    background: #2563eb;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(59, 130, 246, 0.45);
+}
+.btn-convert:active:not(:disabled) { transform: translateY(0); }
+.btn-convert:disabled { opacity: 0.65; cursor: not-allowed; transform: none; }
+
+/* =====================================================================
+   Download Button
+   ===================================================================== */
+.btn-download {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1.5rem;
+    font-weight: 600;
+    font-size: 0.9375rem;
+    border-radius: 0.75rem;
+    background: #4f46e5;
+    color: #ffffff;
+    text-decoration: none;
+    box-shadow: 0 4px 15px rgba(79, 70, 229, 0.38);
+    transition: background 0.15s, transform 0.12s;
+}
+.btn-download:hover {
+    background: #4338ca;
+    transform: translateY(-2px);
+}
+.btn-download:active { transform: translateY(0); }
+
+.btn-download-icon {
+    width: 2.25rem;
+    height: 2.25rem;
+    background: rgba(0, 0, 0, 0.22);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+/* =====================================================================
+   Spinner
+   ===================================================================== */
+.spinner-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.spinner-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1.5rem;
+    background: #4f46e5;
+    border-radius: 0.75rem;
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 0.9375rem;
+    box-shadow: 0 4px 15px rgba(79, 70, 229, 0.3);
+}
+
+/* =====================================================================
+   History Section
+   ===================================================================== */
+.history-section {
+    border-top: 1px solid var(--divider);
+    padding-top: 1rem;
+    margin-top: 2rem;
+}
+.history-title {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin-bottom: 0.75rem;
+}
+.history-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--history-item-bg);
+    border: 1px solid var(--history-border);
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+}
+.history-item-text { font-size: 0.875rem; color: var(--text-secondary); }
+.history-link {
+    font-size: 0.75rem;
+    color: var(--link-color);
+    text-decoration: underline;
+    white-space: nowrap;
+    margin-left: 0.75rem;
+    flex-shrink: 0;
+    transition: color 0.15s;
+}
+.history-link:hover { color: var(--link-hover); }
+.ts { font-size: 0.75rem; opacity: 0.65; }
+
+/* =====================================================================
+   Footer
+   ===================================================================== */
+.footer-text {
+    color: var(--footer-text);
+    font-style: italic;
+    font-size: 0.875rem;
+    text-align: center;
+}
+.footer-text a {
+    color: var(--link-color);
+    text-decoration: none;
+    transition: color 0.15s;
+}
+.footer-text a:hover { color: var(--link-hover); text-decoration: underline; }
+
+/* =====================================================================
+   Section hint text
+   ===================================================================== */
+.section-hint {
+    font-size: 0.75rem;
+    font-style: italic;
+    color: var(--text-muted);
+}
+
+/* =====================================================================
+   Quality Slider
+   ===================================================================== */
+input[type=range] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: linear-gradient(to right,
+        #6366f1 0%,
+        #6366f1 var(--quality-pct, 85%),
+        var(--input-border) var(--quality-pct, 85%),
+        var(--input-border) 100%);
+    outline: none;
+    cursor: pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #6366f1;
+    border: 2px solid white;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+}
+input[type=range]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #6366f1;
+    border: 2px solid white;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+    border-style: solid;
+}
+
+/* =====================================================================
+   Responsive Breakpoints
+   ===================================================================== */
+
+/* Mobile — up to 639 px */
+@media (max-width: 639px) {
+    .app-page { padding: 0.75rem 0.5rem; }
+    .app-card  { padding: 1.25rem 1rem; border-radius: 0.875rem; }
+
+    /* File card: 2-row on narrow screens */
+    .file-card {
+        grid-template-columns: 44px 1fr;
+        grid-template-rows: auto auto;
+    }
+    .file-card > *:last-child {
+        grid-column: 1 / -1;
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    /* Full-width convert button on mobile */
+    .btn-convert { width: 100%; }
+
+    /* Spinner pill fills width */
+    .spinner-pill { width: 100%; justify-content: center; }
+}
+
+/* Tablet — 640 px to 1023 px */
+@media (min-width: 640px) and (max-width: 1023px) {
+    .app-page { padding: 1.5rem 1.5rem; }
+    .app-card  { padding: 1.75rem 1.5rem; }
+}
+
+/* Desktop — 1024 px and wider */
+@media (min-width: 1024px) {
+    .app-page { padding: 2.5rem 1rem; align-items: center; }
+}
+
+/* =====================================================================
+   Custom Scrollbar (WebKit)
+   ===================================================================== */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+    background: rgba(99, 102, 241, 0.4);
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.7); }
